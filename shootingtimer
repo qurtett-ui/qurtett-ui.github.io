@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>エアガン シューティングタイマー</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            text-align: center;
+            padding: 20px;
+            margin: 0;
+        }
+        h1 { color: #ffcc00; font-size: 24px; }
+        #status { font-size: 32px; font-weight: bold; margin: 30px 0; min-height: 40px; color: #00ffcc; }
+        #timerDisplay { font-size: 64px; font-weight: bold; font-family: monospace; margin: 20px 0; color: #ffffff; }
+        button {
+            background-color: #ffcc00;
+            color: #000;
+            border: none;
+            padding: 15px 40px;
+            font-size: 24px;
+            font-weight: bold;
+            border-radius: 10px;
+            cursor: pointer;
+            width: 80%;
+            max-width: 300px;
+        }
+        button:active { background-color: #cca300; }
+        .config-box {
+            background-color: #2a2a2a;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 30px auto;
+            max-width: 400px;
+            text-align: left;
+        }
+        label { display: block; font-size: 16px; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; margin-bottom: 15px; }
+        .val-disp { font-weight: bold; color: #ffcc00; float: right; }
+    </style>
+</head>
+<body>
+
+    <h1>Shooting Timer</h1>
+
+    <div id="status">【START】を押して射撃</div>
+    <div id="timerDisplay">0.000 秒</div>
+
+    <button id="startBtn">START</button>
+
+    <div class="config-box">
+        <label>マイク感度調整（しきい値） <span id="thresholdVal" class="val-disp">30</span></label>
+        <input type="range" id="thresholdSlider" min="5" max="100" value="30">
+
+        <label>現在の音量メーター <span id="currentVolume" class="val-disp">0</span></label>
+        <div style="background:#555; width:100%; height:10px; border-radius:5px; overflow:hidden;">
+            <div id="volumeBar" style="background:#00ffcc; width:0%; height:100%;"></div>
+        </div>
+    </div>
+
+    <script>
+        let audioContext = null;
+        let analyser = null;
+        let javascriptNode = null;
+        let isRunning = false;
+        let isListening = false;
+        let startTime = 0;
+        let randomTimerId = null;
+
+        const startBtn = document.getElementById('startBtn');
+        const statusDisp = document.getElementById('status');
+        const timerDisp = document.getElementById('timerDisplay');
+        const thresholdSlider = document.getElementById('thresholdSlider');
+        const thresholdVal = document.getElementById('thresholdVal');
+        const currentVolume = document.getElementById('currentVolume');
+        const volumeBar = document.getElementById('volumeBar');
+
+        // 音声認識の初期化（初回クリック時にユーザー許可を得る）
+        async function initAudio() {
+            if (audioContext) return;
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                
+                javascriptNode = audioContext.createScriptProcessor(256, 1, 1);
+                source.connect(analyser);
+                analyser.connect(javascriptNode);
+                javascriptNode.connect(audioContext.destination);
+
+                javascriptNode.onaudioprocess = function() {
+                    const array = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteFrequencyData(array);
+                    let values = 0;
+                    for (let i = 0; i < array.length; i++) {
+                        values += array[i];
+                    }
+                    // 平均音量を計算 (0〜255の値を100基準に丸める)
+                    let volume = Math.round((values / array.length) * 0.4);
+                    
+                    // 音量メーターの更新
+                    currentVolume.textContent = volume;
+                    volumeBar.style.width = Math.min(volume, 100) + '%';
+
+                    // 音検知ロジック
+                    let threshold = parseInt(thresholdSlider.value);
+                    if (isListening && volume >= threshold) {
+                        stopTimer();
+                    }
+                };
+            } catch (e) {
+                alert("マイクの起動に失敗しました。設定でマイクを許可してください。");
+            }
+        }
+
+        // スライダー値の更新
+        thresholdSlider.oninput = function() {
+            thresholdVal.textContent = this.value;
+        };
+
+        // ピッというビープ音を鳴らす
+        function playBeep() {
+            const osc = audioContext.createOscillator();
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(1000, audioContext.currentTime); // 1000Hz
+            osc.connect(audioContext.destination);
+            osc.start();
+            osc.stop(audioContext.currentTime + 0.3); // 0.3秒間鳴らす
+        }
+
+        // 計測の開始（ランダム待機へ）
+        startBtn.onclick = async function() {
+            await initAudio();
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+
+            if (isRunning) {
+                // 中断処理
+                clearTimeout(randomTimerId);
+                isListening = false;
+                isRunning = false;
+                statusDisp.textContent = "キャンセルされました";
+                startBtn.textContent = "START";
+                return;
+            }
+
+            isRunning = true;
+            isListening = false;
+            statusDisp.textContent = "READY... (ランダム待機)";
+            statusDisp.style.color = "#ff3366";
+            timerDisp.textContent = "0.000 秒";
+            startBtn.textContent = "STOP";
+
+            // 2〜5秒の間でランダムにスタート
+            let randomDelay = Math.floor(Math.random() * 3000) + 2000;
+            randomTimerId = setTimeout(goSignal, randomDelay);
+        };
+
+        // GOシグナル（ここから計測開始）
+        function goSignal() {
+            playBeep();
+            statusDisp.textContent = "GO! 撃て！";
+            statusDisp.style.color = "#00ffcc";
+            startTime = performance.now();
+            isListening = true;
+
+            // リアルタイムでタイマー画面を動かす
+            updateTimerDisplay();
+        }
+
+        function updateTimerDisplay() {
+            if (!isListening) return;
+            let elapsed = (performance.now() - startTime) / 1000;
+            timerDisp.textContent = elapsed.toFixed(3) + " 秒";
+            requestAnimationFrame(updateTimerDisplay);
+        }
+
+        // 音検知によるストップ
+        function stopTimer() {
+            isListening = false;
+            isRunning = false;
+            let endTime = performance.now();
+            let finalTime = (endTime - startTime) / 1000;
+            
+            timerDisp.textContent = finalTime.toFixed(3) + " 秒";
+            statusDisp.textContent = "HIT! 計測完了";
+            statusDisp.style.color = "#ffcc00";
+            startBtn.textContent = "START";
+        }
+    </script>
+</body>
+</html>
